@@ -18,29 +18,40 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * 
+ * 
  */
 
 //Piezo defines
-#define NUM_PIEZOS 6
-#define SNARE_THRESHOLD 30     //anything < TRIGGER_THRESHOLD is treated as 0
-#define LTOM_THRESHOLD 30
-#define RTOM_THRESHOLD 30
-#define LCYM_THRESHOLD 100
-#define RCYM_THRESHOLD 100
-#define KICK_THRESHOLD 50
-#define START_SLOT 0     //first analog slot of piezos
+#define NUM_PIEZOS 8
+#define START_SLOT 0        //first analog slot of piezos, they must be contiguous
+
+#define BASS_THRESHOLD  50  //anything < TRIGGER_THRESHOLD is treated as 0
+#define SNARE_THRESHOLD 30
+#define HIHAT_THRESHOLD 30
+#define HITOM_THRESHOLD 30
+#define LOTOM_THRESHOLD 30
+#define FLTOM_THRESHOLD 30
+#define CRASH_THRESHOLD 30
+#define RIDE_THRESHOLD  30 
+
+#define MAX_PIEZO_READ 1023 // max value from the A/D converter
 
 //MIDI note defines for each trigger
-#define SNARE_NOTE 70
-#define LTOM_NOTE 71
-#define RTOM_NOTE 72
-#define LCYM_NOTE 73
-#define RCYM_NOTE 74
-#define KICK_NOTE 75
+#define BASS_NOTE  36
+#define SNARE_NOTE 38
+#define HIHAT_NOTE 42
+#define HITOM_NOTE 48
+#define LOTOM_NOTE 45
+#define FLTOM_NOTE 41
+#define CRASH_NOTE 49
+#define RIDE_NOTE  51 
 
 //MIDI defines
+#define MIDI_CHANNEL 10
 #define NOTE_ON_CMD 0x90
 #define NOTE_OFF_CMD 0x80
+#define MIN_MIDI_VELOCITY 10
 #define MAX_MIDI_VELOCITY 127
 
 //MIDI baud rate
@@ -48,23 +59,21 @@
 
 //Program defines
 //ALL TIME MEASURED IN MILLISECONDS
-#define SIGNAL_BUFFER_SIZE 100
+//#define SIGNAL_BUFFER_SIZE 100
+#define SIGNAL_BUFFER_SIZE 70
 #define PEAK_BUFFER_SIZE 30
 #define MAX_TIME_BETWEEN_PEAKS 20
 #define MIN_TIME_BETWEEN_NOTES 50
 
-//map that holds the mux slots of the piezos
-unsigned short slotMap[NUM_PIEZOS];
-
 //map that holds the respective note to each piezo
-unsigned short noteMap[NUM_PIEZOS];
+unsigned char noteMap[NUM_PIEZOS];
 
 //map that holds the respective threshold to each piezo
-unsigned short thresholdMap[NUM_PIEZOS];
+unsigned char thresholdMap[NUM_PIEZOS];
 
 //Ring buffers to store analog signal and peaks
-short currentSignalIndex[NUM_PIEZOS];
-short currentPeakIndex[NUM_PIEZOS];
+unsigned char currentSignalIndex[NUM_PIEZOS];
+unsigned char currentPeakIndex[NUM_PIEZOS];
 unsigned short signalBuffer[NUM_PIEZOS][SIGNAL_BUFFER_SIZE];
 unsigned short peakBuffer[NUM_PIEZOS][PEAK_BUFFER_SIZE];
 
@@ -80,7 +89,7 @@ void setup()
   Serial.begin(SERIAL_RATE);
   
   //initialize globals
-  for(short i=0; i<NUM_PIEZOS; ++i)
+  for(char i=0; i<NUM_PIEZOS; ++i)
   {
     currentSignalIndex[i] = 0;
     currentPeakIndex[i] = 0;
@@ -91,32 +100,36 @@ void setup()
     isLastPeakZeroed[i] = true;
     lastPeakTime[i] = 0;
     lastNoteTime[i] = 0;    
-    slotMap[i] = START_SLOT + i;
   }
   
-  thresholdMap[0] = KICK_THRESHOLD;
-  thresholdMap[1] = RTOM_THRESHOLD;
-  thresholdMap[2] = RCYM_THRESHOLD;
-  thresholdMap[3] = LCYM_THRESHOLD;
-  thresholdMap[4] = SNARE_THRESHOLD;
-  thresholdMap[5] = LTOM_THRESHOLD;  
+  thresholdMap[0] = BASS_THRESHOLD;
+  thresholdMap[1] = SNARE_THRESHOLD;
+  thresholdMap[2] = HIHAT_THRESHOLD;
+  thresholdMap[3] = HITOM_THRESHOLD;
+  thresholdMap[4] = LOTOM_THRESHOLD;
+  thresholdMap[5] = FLTOM_THRESHOLD;
+  thresholdMap[6] = CRASH_THRESHOLD;
+  thresholdMap[7] = RIDE_THRESHOLD;
   
-  noteMap[0] = KICK_NOTE;
-  noteMap[1] = RTOM_NOTE;
-  noteMap[2] = RCYM_NOTE;
-  noteMap[3] = LCYM_NOTE;
-  noteMap[4] = SNARE_NOTE;
-  noteMap[5] = LTOM_NOTE;  
+  noteMap[0] = BASS_NOTE;
+  noteMap[1] = SNARE_NOTE;
+  noteMap[2] = HIHAT_NOTE;
+  noteMap[3] = HITOM_NOTE;
+  noteMap[4] = LOTOM_NOTE;
+  noteMap[5] = FLTOM_NOTE;  
+  noteMap[6] = CRASH_NOTE;
+  noteMap[7] = RIDE_NOTE; 
+   
 }
 
 void loop()
 {
   unsigned long currentTime = millis();
   
-  for(short i=0; i<NUM_PIEZOS; ++i)
+  for(char i=0; i<NUM_PIEZOS; ++i)
   {
     //get a new signal from analog read
-    unsigned short newSignal = analogRead(slotMap[i]);
+    unsigned short newSignal = analogRead(START_SLOT+i);
     signalBuffer[i][currentSignalIndex[i]] = newSignal;
     
     //if new signal is 0
@@ -129,7 +142,7 @@ void loop()
       else
       {
         //get previous signal
-        short prevSignalIndex = currentSignalIndex[i]-1;
+        char prevSignalIndex = currentSignalIndex[i]-1;
         if(prevSignalIndex < 0) prevSignalIndex = SIGNAL_BUFFER_SIZE-1;        
         unsigned short prevSignal = signalBuffer[i][prevSignalIndex];
         
@@ -145,7 +158,7 @@ void loop()
           }
           
           //decrement previous signal index, and get previous signal
-          prevSignalIndex--;
+          --prevSignalIndex;
           if(prevSignalIndex < 0) prevSignalIndex = SIGNAL_BUFFER_SIZE-1;
           prevSignal = signalBuffer[i][prevSignalIndex];
         }
@@ -158,7 +171,7 @@ void loop()
   
     }
         
-    currentSignalIndex[i]++;
+    ++currentSignalIndex[i];
     if(currentSignalIndex[i] == SIGNAL_BUFFER_SIZE) currentSignalIndex[i] = 0;
   }
 }
@@ -191,7 +204,7 @@ void recordNewPeak(short slot, short newPeak)
   }
   else if(newPeak < prevPeak && noteReady[slot])
   {
-    noteFire(noteMap[slot], noteReadyVelocity[slot]);
+    noteFire(noteMap[slot], map(noteReadyVelocity[slot],thresholdMap[slot],MAX_PIEZO_READ,MIN_MIDI_VELOCITY,MAX_MIDI_VELOCITY));
     noteReady[slot] = false;
     noteReadyVelocity[slot] = 0;
     lastNoteTime[slot] = currentTime;
@@ -212,15 +225,14 @@ void noteFire(unsigned short note, unsigned short velocity)
 
 void midiNoteOn(byte note, byte midiVelocity)
 {
-  Serial.write(NOTE_ON_CMD);
+  Serial.write(NOTE_ON_CMD | (MIDI_CHANNEL - 1));
   Serial.write(note);
   Serial.write(midiVelocity);
 }
 
 void midiNoteOff(byte note, byte midiVelocity)
 {
-  Serial.write(NOTE_OFF_CMD);
+  Serial.write(NOTE_OFF_CMD | (MIDI_CHANNEL - 1));
   Serial.write(note);
   Serial.write(midiVelocity);
 }
-
