@@ -1,12 +1,5 @@
 /*
- * Copyright (c) 2015 Evan Kale
- * Email: EvanKale91@gmail.com
- * Website: www.ISeeDeadPixel.com
- *          www.evankale.blogspot.ca
- *
- * This file is part of ArduinoMidiDrums.
- *
- * ArduinoMidiDrums is free software: you can redistribute it and/or modify
+ * arDrum is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
@@ -23,8 +16,9 @@
  */
 
 //Piezo defines
-#define NUM_PIEZOS 8
-#define START_SLOT 0        //first analog slot of piezos, they must be contiguous
+#define NUM_PIEZOS  8
+#define START_SLOT  0        //first analog slot of piezos, they must be contiguous
+#define HIHAT_PIEZO 2        //index of the hi hat piezo
 
 #define BASS_THRESHOLD  50  //anything < TRIGGER_THRESHOLD is treated as 0
 #define SNARE_THRESHOLD 30
@@ -37,15 +31,24 @@
 
 #define MAX_PIEZO_READ 1023 // max value from the A/D converter
 
+//Digital inputs
+#define FOOT_1_UP_INPUT     8  // first foot pedal, lifted  (bass drum)
+#define FOOT_1_DOWN_INPUT   9  // first foot pedal, pressed (bass drum)
+#define FOOT_2_DOWN_INPUT   10 // second foot pedal, pressed (hi hat pedal)
+
+#define FOOT_VEL_FACTOR   100000.0 // factor used to calculate the velocity
+
 //MIDI note defines for each trigger
-#define BASS_NOTE  36
-#define SNARE_NOTE 38
-#define HIHAT_NOTE 42
-#define HITOM_NOTE 48
-#define LOTOM_NOTE 45
-#define FLTOM_NOTE 41
-#define CRASH_NOTE 49
-#define RIDE_NOTE  51 
+#define BASS_NOTE         36
+#define SNARE_NOTE        38
+#define HIHAT_CLOSED_NOTE 42
+#define HIHAT_OPEN_NOTE   46
+#define HIHAT_PEDAL_NOTE  44
+#define HITOM_NOTE        48
+#define LOTOM_NOTE        45
+#define FLTOM_NOTE        41
+#define CRASH_NOTE        49
+#define RIDE_NOTE         51 
 
 //MIDI defines
 #define MIDI_CHANNEL 10
@@ -84,6 +87,24 @@ boolean isLastPeakZeroed[NUM_PIEZOS];
 unsigned long lastPeakTime[NUM_PIEZOS];
 unsigned long lastNoteTime[NUM_PIEZOS];
 
+// foot switches statuses
+unsigned char footSwitch1Status;
+unsigned char footSwitch2Status;
+
+enum fsStatus
+{
+  fsStatusUp = 0,
+  fsStatusArmed,
+  fsStatusDown,
+  fsStatusReleased
+};
+
+unsigned long footSwitch1TriggerTime;
+unsigned long footSwitch1NoteTime;
+
+unsigned long footSwitch2TriggerTime;
+unsigned long footSwitch2NoteTime;
+
 void setup()
 {
   Serial.begin(SERIAL_RATE);
@@ -113,13 +134,25 @@ void setup()
   
   noteMap[0] = BASS_NOTE;
   noteMap[1] = SNARE_NOTE;
-  noteMap[2] = HIHAT_NOTE;
+  noteMap[2] = HIHAT_CLOSED_NOTE;
   noteMap[3] = HITOM_NOTE;
   noteMap[4] = LOTOM_NOTE;
   noteMap[5] = FLTOM_NOTE;  
   noteMap[6] = CRASH_NOTE;
   noteMap[7] = RIDE_NOTE; 
-   
+
+  pinMode(FOOT_1_UP_INPUT  , INPUT_PULLUP);
+  pinMode(FOOT_1_DOWN_INPUT, INPUT_PULLUP);
+  pinMode(FOOT_2_DOWN_INPUT, INPUT_PULLUP);
+
+  footSwitch1Status = fsStatusUp;
+  footSwitch2Status = fsStatusUp;
+
+  footSwitch1TriggerTime = 0;
+  footSwitch1NoteTime    = 0;
+
+  footSwitch2TriggerTime = 0;
+  footSwitch2NoteTime    = 0;  
 }
 
 void loop()
@@ -174,6 +207,86 @@ void loop()
     ++currentSignalIndex[i];
     if(currentSignalIndex[i] == SIGNAL_BUFFER_SIZE) currentSignalIndex[i] = 0;
   }
+  
+  // check the status of the foot switches
+  {
+
+    // Bass Drum Foot Switch
+    bool footSwitch1Top    = digitalRead(FOOT_1_UP_INPUT);
+    bool footSwitch1Bottom = digitalRead(FOOT_1_DOWN_INPUT);
+    
+    switch(footSwitch1Status)
+    {
+      case fsStatusUp:
+        if(footSwitch1Top && ((currentTime - footSwitch1NoteTime) > MIN_TIME_BETWEEN_NOTES))
+        {
+          footSwitch1Status = fsStatusArmed;
+          footSwitch1TriggerTime = micros();
+        }
+        break;
+      case fsStatusArmed:
+        if(!footSwitch1Top)
+        {
+          footSwitch1Status = fsStatusUp;
+        }
+        else if(!footSwitch1Bottom)
+        {
+          footSwitch1Status = fsStatusDown;
+          footSwitch1NoteTime = currentTime;
+          unsigned char velKey = MIN_MIDI_VELOCITY + (FOOT_VEL_FACTOR / (micros() - footSwitch1TriggerTime));
+          //unsigned char velKey = (micros() - footSwitch1TriggerTime);
+          noteFire(BASS_NOTE, velKey);
+        }
+        break;
+      case fsStatusDown:
+        if(footSwitch1Bottom)
+        {
+          footSwitch1Status = fsStatusReleased;
+        }
+        break;
+      case fsStatusReleased:
+        if(!footSwitch1Bottom)
+        {
+          footSwitch1Status = fsStatusDown;
+        }
+        else if(!footSwitch1Top)
+        {
+          footSwitch1Status = fsStatusUp;          
+        }
+        break;
+      default:
+        break;
+    }
+
+    // Hi-Hat Pedal Foot Switch
+    bool footSwitch2Bottom = digitalRead(FOOT_2_DOWN_INPUT);
+    switch(footSwitch2Status)
+    {
+      case fsStatusUp:
+        if(!footSwitch2Bottom)
+        {
+          footSwitch2Status = fsStatusDown;
+          footSwitch2NoteTime = currentTime;
+          unsigned char velKey = FOOT_VEL_FACTOR / (micros() - footSwitch2TriggerTime);
+          if(velKey > MIN_MIDI_VELOCITY)
+          {
+            noteFire(HIHAT_PEDAL_NOTE, velKey);                    
+          }          
+
+        }
+        break;
+      case fsStatusDown:
+        if(footSwitch2Bottom && ((currentTime - footSwitch2NoteTime) > MIN_TIME_BETWEEN_NOTES))
+        {
+          footSwitch2Status = fsStatusUp;
+          footSwitch2TriggerTime = micros();
+        }
+        break;
+      default:
+        break;
+    }
+    
+  }
 }
 
 void recordNewPeak(short slot, short newPeak)
@@ -204,7 +317,15 @@ void recordNewPeak(short slot, short newPeak)
   }
   else if(newPeak < prevPeak && noteReady[slot])
   {
-    noteFire(noteMap[slot], map(noteReadyVelocity[slot],thresholdMap[slot],MAX_PIEZO_READ,MIN_MIDI_VELOCITY,MAX_MIDI_VELOCITY));
+    unsigned char note;
+    if(slot == HIHAT_PIEZO)
+    {
+      note = (footSwitch2Status == fsStatusDown) ? HIHAT_CLOSED_NOTE : HIHAT_OPEN_NOTE;
+    }
+    else
+      note = noteMap[slot];
+      
+    noteFire(note, map(noteReadyVelocity[slot],thresholdMap[slot],MAX_PIEZO_READ,MIN_MIDI_VELOCITY,MAX_MIDI_VELOCITY));
     noteReady[slot] = false;
     noteReadyVelocity[slot] = 0;
     lastNoteTime[slot] = currentTime;
