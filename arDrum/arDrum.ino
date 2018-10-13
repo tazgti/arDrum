@@ -19,6 +19,7 @@
 #define NUM_PIEZOS  8
 #define START_SLOT  0        //first analog slot of piezos, they must be contiguous
 #define HIHAT_PIEZO 2        //index of the hi hat piezo
+#define SNARE_PIEZO 1        //index of teh snare piezo
 
 #define BASS_THRESHOLD  50  //anything < TRIGGER_THRESHOLD is treated as 0
 #define SNARE_THRESHOLD 30
@@ -32,11 +33,15 @@
 #define MAX_PIEZO_READ 1023 // max value from the A/D converter
 
 //Digital inputs
-#define FOOT_1_UP_INPUT     8  // first foot pedal, lifted  (bass drum)
-#define FOOT_1_DOWN_INPUT   9  // first foot pedal, pressed (bass drum)
-#define FOOT_2_DOWN_INPUT   10 // second foot pedal, pressed (hi hat pedal)
+// Single input: bottom switch connected to the tip
+// Dual input  : bottom switch connected to the middle <---
+//               top switch connected to the tip
 
-#define FOOT_VEL_FACTOR   100000.0 // factor used to calculate the velocity
+#define FOOT_1_TIP_IN     8  // first foot pedal, tip sensor  (bass drum)
+#define FOOT_1_MIDDLE_IN  9  // first foot pedal, middle sensor (bass drum)
+#define FOOT_2_TIP_IN    10  // second foot pedal, pressed (hi hat pedal)
+
+#define FOOT_VEL_FACTOR   6350 // factor used to calculate the velocity
 
 //MIDI note defines for each trigger
 #define BASS_NOTE         36
@@ -67,6 +72,7 @@
 #define PEAK_BUFFER_SIZE 30
 #define MAX_TIME_BETWEEN_PEAKS 20
 #define MIN_TIME_BETWEEN_NOTES 50
+#define SWITCH_DEBOUNCING_TIME 20
 
 //map that holds the respective note to each piezo
 unsigned char noteMap[NUM_PIEZOS];
@@ -87,6 +93,21 @@ boolean isLastPeakZeroed[NUM_PIEZOS];
 unsigned long lastPeakTime[NUM_PIEZOS];
 unsigned long lastNoteTime[NUM_PIEZOS];
 
+// foot switches input state
+bool footSwitch1Middle;
+bool footSwitch1Tip;
+bool footSwitch2Tip;
+
+// foot switch mode
+enum fsMode
+{
+  fsModeDualSwitch = 0,  // dual switch mode, velocity sensing
+  fsModeSingleSwitch,    // single switch mode, adaptive velocity
+  fsModeFixedVelocity    // single switch mode, fixed velocity
+};
+
+unsigned char footSwitch1Mode;
+
 // foot switches statuses
 unsigned char footSwitch1Status;
 unsigned char footSwitch2Status;
@@ -100,10 +121,12 @@ enum fsStatus
 };
 
 unsigned long footSwitch1TriggerTime;
-unsigned long footSwitch1NoteTime;
+//unsigned long footSwitch1NoteTime;
 
 unsigned long footSwitch2TriggerTime;
-unsigned long footSwitch2NoteTime;
+//unsigned long footSwitch2NoteTime;
+
+unsigned char adaptiveVelocity;
 
 void setup()
 {
@@ -141,18 +164,49 @@ void setup()
   noteMap[6] = CRASH_NOTE;
   noteMap[7] = RIDE_NOTE; 
 
-  pinMode(FOOT_1_UP_INPUT  , INPUT_PULLUP);
-  pinMode(FOOT_1_DOWN_INPUT, INPUT_PULLUP);
-  pinMode(FOOT_2_DOWN_INPUT, INPUT_PULLUP);
+  pinMode(FOOT_1_TIP_IN   , INPUT_PULLUP);
+  pinMode(FOOT_1_MIDDLE_IN, INPUT_PULLUP);
+  pinMode(FOOT_2_TIP_IN   , INPUT_PULLUP);
 
   footSwitch1Status = fsStatusUp;
   footSwitch2Status = fsStatusUp;
 
   footSwitch1TriggerTime = 0;
-  footSwitch1NoteTime    = 0;
+  //footSwitch1NoteTime    = 0;
 
   footSwitch2TriggerTime = 0;
-  footSwitch2NoteTime    = 0;  
+  //footSwitch2NoteTime    = 0;  
+
+  // Set the foot switch mode based on the start position of the foot switch
+  delay(100);
+  
+  footSwitch1Tip    = !digitalRead(FOOT_1_TIP_IN);
+  footSwitch1Middle = !digitalRead(FOOT_1_MIDDLE_IN);
+  footSwitch2Tip    = !digitalRead(FOOT_2_TIP_IN);
+    
+  if(!footSwitch1Middle && footSwitch1Tip)
+  {
+    // dual, not pressed
+    footSwitch1Mode = fsModeDualSwitch;
+  }
+  else if(footSwitch1Middle && !footSwitch1Tip)
+  {
+    // single, not pressed
+    footSwitch1Mode = fsModeSingleSwitch;
+  }
+  else if(footSwitch1Middle && footSwitch1Tip)
+  {
+     // single, pressed
+     footSwitch1Mode = fsModeFixedVelocity;    
+  }
+  else
+  {
+    // error, defaults to single
+    footSwitch1Mode = fsModeSingleSwitch;    
+  }
+
+  // Set the adaptive velocity (for use by the bass drum)
+  adaptiveVelocity = MAX_MIDI_VELOCITY / 2;
 }
 
 void loop()
@@ -210,76 +264,129 @@ void loop()
   
   // check the status of the foot switches
   {
+    currentTime = millis();
 
+    // Process switch status
     // Bass Drum Foot Switch
-    bool footSwitch1Top    = digitalRead(FOOT_1_UP_INPUT);
-    bool footSwitch1Bottom = digitalRead(FOOT_1_DOWN_INPUT);
-    
-    switch(footSwitch1Status)
+    if((footSwitch1Mode == fsModeSingleSwitch) || (footSwitch1Mode == fsModeFixedVelocity))
     {
-      case fsStatusUp:
-        if(footSwitch1Top && ((currentTime - footSwitch1NoteTime) > MIN_TIME_BETWEEN_NOTES))
+      // single switch
+        if((currentTime - footSwitch1TriggerTime) > SWITCH_DEBOUNCING_TIME)
         {
-          footSwitch1Status = fsStatusArmed;
-          footSwitch1TriggerTime = micros();
+            footSwitch1Tip = !digitalRead(FOOT_1_TIP_IN);
         }
-        break;
-      case fsStatusArmed:
-        if(!footSwitch1Top)
+        switch(footSwitch1Status)
         {
-          footSwitch1Status = fsStatusUp;
+          case fsStatusUp:
+            if(footSwitch1Tip)
+            {
+              footSwitch1TriggerTime = currentTime;
+              footSwitch1Status      = fsStatusDown;
+              unsigned char velocity;
+              if((footSwitch1Mode == fsModeFixedVelocity))
+              {
+                velocity = 127;
+              }
+              else
+              {
+                // the velocity is set by snare hits
+                velocity = adaptiveVelocity;
+              }
+              noteFire(BASS_NOTE, velocity);               
+            }
+            break;
+          case fsStatusDown:
+            if(!footSwitch1Tip)
+            {
+              footSwitch1TriggerTime = currentTime;
+              footSwitch1Status      = fsStatusUp; 
+            }          
+            break;
+          default:
+            break;
         }
-        else if(!footSwitch1Bottom)
-        {
-          footSwitch1Status = fsStatusDown;
-          footSwitch1NoteTime = currentTime;
-          unsigned char velKey = MIN_MIDI_VELOCITY + (FOOT_VEL_FACTOR / (micros() - footSwitch1TriggerTime));
-          //unsigned char velKey = (micros() - footSwitch1TriggerTime);
-          noteFire(BASS_NOTE, velKey);
-        }
-        break;
-      case fsStatusDown:
-        if(footSwitch1Bottom)
-        {
-          footSwitch1Status = fsStatusReleased;
-        }
-        break;
-      case fsStatusReleased:
-        if(!footSwitch1Bottom)
-        {
-          footSwitch1Status = fsStatusDown;
-        }
-        else if(!footSwitch1Top)
-        {
-          footSwitch1Status = fsStatusUp;          
-        }
-        break;
-      default:
-        break;
+      
     }
-
+    /*
+    else if(footSwitch1Mode == fsModeDualSwitch)
+    {
+        // Dual switch foot pedal mode
+        if(((currentTimeMicro - footSwitch1TriggerTime) > SWITCH_DEBOUNCING_TIME))
+        {
+            footSwitch1Top = !digitalRead(FOOT_1_UP_INPUT);
+        }
+        footSwitch1Bottom = !digitalRead(FOOT_1_DOWN_INPUT); // no need to debounce this
+            
+        switch(footSwitch1Status)
+        {
+          case fsStatusUp:
+            if(!footSwitch1Top)
+            {
+              footSwitch1Status = fsStatusArmed;
+              footSwitch1TriggerTime = currentTimeMicro;
+            }
+            break;
+          case fsStatusArmed:
+            if(footSwitch1Top)
+            {
+              footSwitch1Status = fsStatusUp;
+            }
+            else if(footSwitch1Bottom)
+            {
+              footSwitch1Status = fsStatusDown;
+              //footSwitch1NoteTime = currentTime;
+              unsigned char velKey = MIN_MIDI_VELOCITY + (FOOT_VEL_FACTOR / (currentTimeMicro - footSwitch1TriggerTime));
+              //unsigned char velKey = (micros() - footSwitch1TriggerTime);
+              noteFire(BASS_NOTE, velKey);
+            }
+            break;
+          case fsStatusDown:
+            if(!footSwitch1Bottom)
+            {
+              footSwitch1Status = fsStatusReleased;
+            }
+            break;
+          case fsStatusReleased:
+            if(footSwitch1Bottom)
+            {
+              footSwitch1Status = fsStatusDown;
+            }
+            else if(footSwitch1Top)
+            {
+              footSwitch1Status = fsStatusUp;          
+            }
+            break;
+          default:
+            break;
+        }
+    }
+    */
+    
     // Hi-Hat Pedal Foot Switch
-    bool footSwitch2Bottom = digitalRead(FOOT_2_DOWN_INPUT);
+    if((currentTime - footSwitch2TriggerTime) > SWITCH_DEBOUNCING_TIME)
+    {
+        footSwitch2Tip = !digitalRead(FOOT_2_TIP_IN);
+    }
+    
     switch(footSwitch2Status)
     {
       case fsStatusUp:
-        if(!footSwitch2Bottom)
+        if(footSwitch2Tip)
         {
           footSwitch2Status = fsStatusDown;
-          footSwitch2NoteTime = currentTime;
-          unsigned char velKey = FOOT_VEL_FACTOR / (micros() - footSwitch2TriggerTime);
+          unsigned char velKey = FOOT_VEL_FACTOR / (currentTime - footSwitch2TriggerTime);
           if(velKey > MIN_MIDI_VELOCITY)
           {
             noteFire(HIHAT_PEDAL_NOTE, velKey);                    
-          }          
-
+          }
+          footSwitch2TriggerTime = currentTime;
         }
         break;
       case fsStatusDown:
-        if(footSwitch2Bottom && ((currentTime - footSwitch2NoteTime) > MIN_TIME_BETWEEN_NOTES))
+        if(!footSwitch2Tip)
         {
           footSwitch2Status = fsStatusUp;
-          footSwitch2TriggerTime = micros();
+          footSwitch2TriggerTime = currentTime;
         }
         break;
       default:
@@ -319,13 +426,16 @@ void recordNewPeak(short slot, short newPeak)
   {
     unsigned char note;
     if(slot == HIHAT_PIEZO)
-    {
       note = (footSwitch2Status == fsStatusDown) ? HIHAT_CLOSED_NOTE : HIHAT_OPEN_NOTE;
-    }
     else
       note = noteMap[slot];
+    unsigned char velocity = map(noteReadyVelocity[slot],thresholdMap[slot],MAX_PIEZO_READ,MIN_MIDI_VELOCITY,MAX_MIDI_VELOCITY);
+    noteFire(note, velocity);
+
+    // creates an average adaptive velocity
+    if(slot == SNARE_PIEZO)
+      adaptiveVelocity = (adaptiveVelocity + velocity) >> 1;
       
-    noteFire(note, map(noteReadyVelocity[slot],thresholdMap[slot],MAX_PIEZO_READ,MIN_MIDI_VELOCITY,MAX_MIDI_VELOCITY));
     noteReady[slot] = false;
     noteReadyVelocity[slot] = 0;
     lastNoteTime[slot] = currentTime;
