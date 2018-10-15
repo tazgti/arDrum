@@ -24,7 +24,7 @@
 #define BASS_THRESHOLD  50  //anything < TRIGGER_THRESHOLD is treated as 0
 #define SNARE_THRESHOLD 30
 #define HIHAT_THRESHOLD 30
-#define HITOM_THRESHOLD 30
+#define HITOM_THRESHOLD 50
 #define LOTOM_THRESHOLD 30
 #define FLTOM_THRESHOLD 30
 #define CRASH_THRESHOLD 30
@@ -61,6 +61,7 @@
 #define NOTE_OFF_CMD 0x80
 #define MIN_MIDI_VELOCITY 10
 #define MAX_MIDI_VELOCITY 127
+#define BASS_MIN_MIDI_VELOCITY 100
 
 //MIDI baud rate
 #define SERIAL_RATE 31250
@@ -285,7 +286,7 @@ void loop()
               unsigned char velocity;
               if((footSwitch1Mode == fsModeFixedVelocity))
               {
-                velocity = 127;
+                velocity = (adaptiveVelocity > BASS_MIN_MIDI_VELOCITY) ? adaptiveVelocity : BASS_MIN_MIDI_VELOCITY;
               }
               else
               {
@@ -375,7 +376,7 @@ void loop()
         {
           footSwitch2Status = fsStatusDown;
           unsigned char velKey = FOOT_VEL_FACTOR / (currentTime - footSwitch2TriggerTime);
-          if(velKey > MIN_MIDI_VELOCITY)
+          if(velKey >= MIN_MIDI_VELOCITY)
           {
             noteFire(HIHAT_PEDAL_NOTE, velKey);                    
           }
@@ -429,8 +430,11 @@ void recordNewPeak(short slot, short newPeak)
       note = (footSwitch2Status == fsStatusDown) ? HIHAT_CLOSED_NOTE : HIHAT_OPEN_NOTE;
     else
       note = noteMap[slot];
-    unsigned char velocity = map(noteReadyVelocity[slot],thresholdMap[slot],MAX_PIEZO_READ,MIN_MIDI_VELOCITY,MAX_MIDI_VELOCITY);
-    noteFire(note, velocity);
+    unsigned char velocity = map(noteReadyVelocity[slot],thresholdMap[slot],MAX_PIEZO_READ,0,MAX_MIDI_VELOCITY);
+    if(velocity >= MIN_MIDI_VELOCITY)
+    {
+      noteFire(note, velocity);
+    }
 
     // creates an average adaptive velocity
     if(slot == SNARE_PIEZO)
